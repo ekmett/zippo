@@ -36,7 +36,7 @@ source-repository head
     branch:   master
 
 Library
-  Exposed-modules:     Data.Lens.Zipper
+  Exposed-modules:     Control.Lens.Zipper
 
   Build-depends:       mtl >= 2
                      , lens >= 2.9 && < 3.0
