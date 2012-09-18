@@ -12,18 +12,18 @@ module Data.Lens.Zipper (
 
   -- * Zipper type
     Zipper(..)
-  -- ** Zipper history 
+  -- ** Zipper history
 {- |
    These three types make up the heterogenous history stack, and the programmer
    should never need to use them directly. They come together with 'Zipper' to
    form types that look like, e.g.
-    
+
    > -- a zipper on a Tree, with focus on a leaf "a" of a 2nd level subtree
    > z :: Zipper (Top :> Tree a :> Tree a) a
-    
-   This zipper works conceptually like the \"breacrumbs\" navigation UI design
+
+   This zipper works conceptually like the \"breadcrumbs\" navigation UI design
    pattern, and the types reflect this visually.
-    
+
    Nevertheless user-provided type annotations should almost never be
    necessary, so these will probably never appear in your code.
 -}
@@ -32,7 +32,7 @@ module Data.Lens.Zipper (
   -- * Zipper operations
   , zipper , close
   -- ** Motions
-  , move , moveP , moveUp
+  , move , moves, moveM , moveUp
   -- ** Focus
 {- |
    In addition to these, 'viewf' can be used to view the focus.
@@ -42,90 +42,98 @@ module Data.Lens.Zipper (
  ) where
 
 {- TODO
--      - either switch to new lens lib, or add TH to your own
 -      - excellent rewrite rules
 -          - first look at core output of simple example
 -          - add rules one-by-one, looking at core
--      - change moveP -> pmove?
 -      - consider a newtype-wrapped submodule encapsulating monad return value
 -          what we really want is a notation like:
 -              move x
 -              move y
 -              foc <- move z
--              moveUp 
+-              moveUp
 -              modf (+foc)
--          quasiquotation, or can we shoe-horn this into proc notation? 
+-          quasiquotation, or can we shoe-horn this into proc notation?
 -          otherwise add those combinators (in notes)
 -      - more advanced motions a.la. pez?
 -      - better demos
 -      - pretty Show instance for Zipper
 -}
 
-import Data.Yall.Lens
+import Control.Applicative
+import Control.Lens
+import Control.Lens.Internal
 import Control.Monad.Identity
+import Data.Maybe
 
 -- | Our zipper type, parameterized by a 'focus' and \"history stack\",
 -- supporting completely type-checked zipper operations.
 data Zipper st b = Zipper { hist  :: st b , viewf :: b }
-data (:>) st b c = Snoc (st b) (c -> b) 
+data (:>) st b c = Snoc (st b) (c -> b)
 data Top a = Top
 
 -- | A lens on the focus of the zipper.
-focus :: Zipper st b :-> b
-focus = lens viewf $ \z b-> z{ viewf = b }
+focus :: Simple Lens (Zipper st b) b
+focus f (Zipper h v) = Zipper h <$> f v
 
--- | Set the zipper focus
+-- | Set the zipper focus.
 --
--- > setf = set focus
+-- @'setf' = 'set' 'focus'@
 setf :: Zipper st b -> b -> Zipper st b
-setf = set focus
+setf z b = set focus b z
 
--- | Modify the zipper focus
+-- | Modify the zipper focus.
 --
--- > modf = modify focus
+-- @'modf' = 'modify' 'focus'@
 modf :: (b -> b) -> Zipper st b -> Zipper st b
-modf = modify focus
+modf = over focus
 
 -- | \"enter\" a data type. Move the 'focus' with 'move' and 'moveUp'. Exit
 -- the zipper with 'close'.
 --
--- > zipper = Zipper Top
+-- @'zipper' = 'Zipper' 'Top'@
 zipper :: a -> Zipper Top a
 zipper = Zipper Top
 
-
 class Hist st a c  where
      runHist :: st c -> (c -> a)
--- our only use of TypeFamilies. Thanks to Daniel Wagner for this trick:
+-- | Our only use of @TypeFamilies@. Thanks to Daniel Wagner for this trick:
+
 instance a ~ b => Hist Top a b where
      runHist _ = id
-instance (Hist st a b) => Hist ((:>) st b) a c where
+
+instance Hist st a b => Hist (st :> b) a c where
      runHist (Snoc st' cb) = runHist st' . cb
 
--- | exit the zipper, rebuilding the structure @a@:
+-- | Exit the zipper, rebuilding the structure @a@:
 --
--- > close (Zipper st b) = runHist st b
-close :: (Hist st a b)=> Zipper st b -> a
+-- @'close' ('Zipper' st b) = 'runHist' st b@
+close :: Hist st a b => Zipper st b -> a
 close (Zipper st b) = runHist st b
 
-
-
--- | navigate to a child element indicated by the passed lens, returning the
--- new Zipper in the monad @m@. This will be 'Maybe' when the standard (':~>')
--- Lens is used. For pure lenses, use 'moveP'.
-move :: (Monad m)=> LensM m b c -> Zipper st b -> m (Zipper (st :> b) c)
-move l (Zipper st a) = 
-    liftM (uncurry $ Zipper . Snoc st . fmap runIdentity) (runLens l a)
-
--- | navigate to a child element indicated by the passed pure lens
+-- | Navigate to child elements indicated by the passed 'Traversal', returning the new zippers in a list.
 --
--- > moveP l = runIdentity . move l
-moveP :: (b :-> c) -> Zipper st b -> Zipper (st :> b) c
-moveP l = runIdentity . move l
+-- @
+-- 'moves' :: 'Simple' 'Lens' b c      -> 'Zipper' st b -> ['Zipper' (st ':>' b) c]
+-- 'moves' :: 'Simple' 'Traversal' b c -> 'Zipper' st b -> ['Zipper' (st ':>' b) c]
+-- @
+moves :: SimpleLensLike (Bazaar c c) b c -> Zipper st b -> [Zipper (st :> b) c]
+moves l (Zipper st b) = map (\(Context f c) -> Zipper (Snoc st f) c) (holesOf l b)
 
+-- | Navigate to the first element indicated by a 'Traversal'.
+moveM :: SimpleLensLike (Bazaar c c) b c -> Zipper st b -> Maybe (Zipper (st :> b) c)
+moveM l = listToMaybe . moves l
+
+-- | Navigate to a child element indicated by the passed pure lens.
+--
+-- @
+-- 'move' :: 'Simple' 'Lens' b c -> 'Zipper' st b -> ['Zipper' (st ':>' b) c]
+-- @
+move :: SimpleLensLike (Context c c) b c -> Zipper st b -> Zipper (st :> b) c
+move l (Zipper st b) = case l (Context id) b of
+  Context f c -> Zipper (Snoc st f) c
 
 -- | navigate up a level in a zipper not already at 'Top'
 --
--- > moveUp (Zipper (Snoc st cont) c) = Zipper st $ cont c
+-- @'moveUp' ('Zipper' ('Snoc' st cont) c) = 'Zipper' st '$' cont c@
 moveUp :: Zipper (st :> b) c -> Zipper st b
 moveUp (Zipper (Snoc st cont) c) = Zipper st $ cont c
